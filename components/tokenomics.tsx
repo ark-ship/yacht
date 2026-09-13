@@ -36,7 +36,7 @@ const allocations: Allocation[] = [
     percent: 70,
     amount: "700,000,000",
     description:
-      "700M $YATCH is reserved for Hood Yacht Club staking rewards and long-term holder participation.",
+      "700M $YACHT is reserved for Hood Yacht Club staking rewards and long-term holder participation.",
     color: "#c8ff00",
   },
   {
@@ -46,7 +46,7 @@ const allocations: Allocation[] = [
     percent: 10,
     amount: "100,000,000",
     description:
-      "100M $YATCH is allocated for liquidity across HYC markets and the ecosystem.",
+      "100M $YACHT is allocated for liquidity across HYC markets and the ecosystem.",
     color: "#91ad12",
   },
   {
@@ -56,7 +56,7 @@ const allocations: Allocation[] = [
     percent: 10,
     amount: "100,000,000",
     description:
-      "100M $YATCH is reserved for infrastructure, development and future HYC ecosystem expansion.",
+      "100M $YACHT is reserved for infrastructure, development and future HYC ecosystem expansion.",
     color: "#6f8410",
   },
   {
@@ -66,7 +66,7 @@ const allocations: Allocation[] = [
     percent: 5,
     amount: "50,000,000",
     description:
-      "50M $YATCH is reserved for the team with a long-term vesting structure.",
+      "50M $YACHT is reserved for the team with a long-term vesting structure.",
     color: "#4e5b0f",
   },
   {
@@ -76,7 +76,7 @@ const allocations: Allocation[] = [
     percent: 5,
     amount: "50,000,000",
     description:
-      "50M $YATCH is reserved for partnerships, collaborations, community growth and campaigns.",
+      "50M $YACHT is reserved for partnerships, collaborations, community growth and campaigns.",
     color: "#30380b",
   },
 ];
@@ -235,7 +235,7 @@ function CenterCoin() {
       >
         <div className="tokenomics-coin">
           <strong>1B</strong>
-          <span>$YATCH</span>
+          <span>$YACHT</span>
         </div>
       </Html>
     </group>
@@ -373,7 +373,7 @@ export default function Tokenomics() {
         <div className="tokenomics-heading">
 
           <span className="label">
-            $YATCH / TOKENOMICS
+            $YACHT / TOKENOMICS
           </span>
 
           <h2>
@@ -395,7 +395,7 @@ export default function Tokenomics() {
           </strong>
 
           <span>
-            $YATCH
+            $YACHT
           </span>
 
         </div>
@@ -487,7 +487,7 @@ export default function Tokenomics() {
               </strong>
 
               <span>
-                {selected.amount} $YATCH
+                {selected.amount} $YACHT
               </span>
 
             </div>
