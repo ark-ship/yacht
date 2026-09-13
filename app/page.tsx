@@ -9,9 +9,6 @@ import {
 
 import {
   formatUnits,
-  parseAbiItem,
-  type Address,
-  type PublicClient,
 } from "viem";
 
 import {
@@ -20,7 +17,6 @@ import {
   useSwitchChain,
   useWriteContract,
   useWaitForTransactionReceipt,
-  usePublicClient,
 } from "wagmi";
 
 import {
@@ -247,186 +243,6 @@ async function fetchMetadata(
   return {};
 }
 
-function normalizeAddress(
-  value: string
-): string {
-  return value.toLowerCase();
-}
-
-function makeTokenRange(
-  start: number,
-  end: number
-): bigint[] {
-  const tokenIds: bigint[] = [];
-
-  for (
-    let tokenId = start;
-    tokenId <= end;
-    tokenId += 1
-  ) {
-    tokenIds.push(BigInt(tokenId));
-  }
-
-  return tokenIds;
-}
-
-const erc721EnumerableAbi = [
-  {
-    type: "function",
-    name: "supportsInterface",
-    stateMutability: "view",
-    inputs: [
-      { name: "interfaceId", type: "bytes4" },
-    ],
-    outputs: [
-      { name: "", type: "bool" },
-    ],
-  },
-  {
-    type: "function",
-    name: "tokenOfOwnerByIndex",
-    stateMutability: "view",
-    inputs: [
-      { name: "owner", type: "address" },
-      { name: "index", type: "uint256" },
-    ],
-    outputs: [
-      { name: "", type: "uint256" },
-    ],
-  },
-] as const;
-
-const ERC721_ENUMERABLE_INTERFACE_ID =
-  "0x780e9d63" as const;
-
-async function findOwnedTokenIds(
-  publicClient: PublicClient,
-  wallet: Address,
-  start: number,
-  end: number
-): Promise<bigint[]> {
-  const walletAddress =
-    normalizeAddress(wallet);
-
-  /*
-   * First try ERC721Enumerable. This is the production-friendly path
-   * because it asks the NFT contract directly which token IDs belong
-   * to the connected wallet. No event-history scan and no multicall.
-   */
-  try {
-    const enumerableSupported =
-      await publicClient.readContract({
-        address: NFT_CONTRACT,
-        abi: erc721EnumerableAbi,
-        functionName: "supportsInterface",
-        args: [
-          ERC721_ENUMERABLE_INTERFACE_ID,
-        ],
-      });
-
-    if (enumerableSupported) {
-      const balance =
-        await publicClient.readContract({
-          address: NFT_CONTRACT,
-          abi: erc721Abi,
-          functionName: "balanceOf",
-          args: [wallet],
-        });
-
-      const ownedTokenIds: bigint[] = [];
-
-      for (
-        let index = 0n;
-        index < balance;
-        index += 1n
-      ) {
-        const tokenId =
-          await publicClient.readContract({
-            address: NFT_CONTRACT,
-            abi: erc721EnumerableAbi,
-            functionName: "tokenOfOwnerByIndex",
-            args: [wallet, index],
-          });
-
-        ownedTokenIds.push(tokenId);
-      }
-
-      return ownedTokenIds;
-    }
-  } catch (error) {
-    console.warn(
-      "ERC721Enumerable lookup unavailable, falling back to ownerOf scan.",
-      error
-    );
-  }
-
-  /*
-   * Generic ERC721 fallback. This works even when the collection does
-   * not implement ERC721Enumerable. Calls are sent individually so
-   * this does not depend on Multicall3 being deployed on Robinhood.
-   */
-  const tokenIds =
-    makeTokenRange(start, end);
-
-  const ownedTokenIds: bigint[] = [];
-  const concurrency = 20;
-  let cursor = 0;
-
-  async function worker() {
-    while (true) {
-      const index = cursor++;
-
-      if (index >= tokenIds.length) {
-        return;
-      }
-
-      const tokenId = tokenIds[index];
-
-      try {
-        const owner =
-          await publicClient.readContract({
-            address: NFT_CONTRACT,
-            abi: erc721Abi,
-            functionName: "ownerOf",
-            args: [tokenId],
-          });
-
-        if (
-          normalizeAddress(String(owner)) ===
-          walletAddress
-        ) {
-          ownedTokenIds.push(tokenId);
-        }
-      } catch {
-        // Non-existent/burned token IDs revert. Ignore them.
-      }
-    }
-  }
-
-  await Promise.all(
-    Array.from(
-      {
-        length: Math.min(
-          concurrency,
-          tokenIds.length
-        ),
-      },
-      () => worker()
-    )
-  );
-
-  ownedTokenIds.sort(
-    (a, b) =>
-      a < b
-        ? -1
-        : a > b
-        ? 1
-        : 0
-  );
-
-  return ownedTokenIds;
-}
-
 async function mapWithConcurrency<T, R>(
   items: T[],
   worker: (item: T) => Promise<R>,
@@ -479,12 +295,6 @@ export default function Home() {
     isConnected,
     chainId,
   } = useAccount();
-
-  const publicClient =
-    usePublicClient({
-      chainId:
-        ROBINHOOD_CHAIN_ID,
-    });
 
   const {
     switchChain,
@@ -804,110 +614,102 @@ export default function Home() {
       async () => {
         if (
           !address ||
-          wrongNetwork ||
-          !publicClient
+          wrongNetwork
         ) {
           setOwnedNFTs([]);
           return;
         }
 
-        setIsLoadingNFTs(
-          true
-        );
-
+        setIsLoadingNFTs(true);
         setNFTLoadError("");
 
         try {
           /*
-           * Production-safe ownership lookup.
-           *
-           * We do NOT scan the entire Transfer history anymore.
-           * We first use ERC721Enumerable when available.
-           * Otherwise the loader falls back to direct ownerOf() calls.
-           *
-           * HYC supply = 5,555, so the fallback is bounded and does not
-           * depend on eth_getLogs block-range limits or Multicall3.
+           * Production NFT discovery uses the server-side Alchemy NFT API.
+           * This avoids scanning thousands of ERC721 calls in the browser
+           * and avoids Multicall3 / eth_getLogs limitations.
            */
-          let ownedTokenIds =
-            await findOwnedTokenIds(
-              publicClient,
-              address,
-              1,
-              NFT_SUPPLY
+          const response =
+            await fetch(
+              `/api/nfts?owner=${encodeURIComponent(address)}`,
+              { cache: "no-store" }
             );
 
-          /*
-           * Fallback for collections minted from token ID 0.
-           * This costs another bounded scan only when the first
-           * convention returns zero NFTs.
-           */
-          if (
-            ownedTokenIds.length ===
-            0
-          ) {
-            ownedTokenIds =
-              await findOwnedTokenIds(
-                publicClient,
-                address,
-                0,
-                NFT_SUPPLY - 1
-              );
+          const payload =
+            (await response.json()) as {
+              nfts?: Array<{
+                tokenId: string;
+                name: string;
+                image: string;
+                animationUrl?: string;
+              }>;
+              error?: string;
+            };
+
+          if (!response.ok) {
+            throw new Error(
+              payload.error ||
+                "Unable to load your HYC NFTs."
+            );
           }
 
-          ownedTokenIds.sort(
-            (a, b) =>
-              a < b
-                ? -1
-                : a > b
-                ? 1
-                : 0
-          );
+          const nfts =
+            (payload.nfts ?? []).map(
+              (nft) => ({
+                tokenId: BigInt(nft.tokenId),
+                name: nft.name,
+                image: nft.image,
+                animationUrl:
+                  nft.animationUrl,
+              })
+            );
 
-          /*
-           * Fetch metadata in controlled parallel batches so a wallet
-           * holding many NFTs does not flood the IPFS gateways.
-           */
           const metadataResults =
             await mapWithConcurrency(
-              ownedTokenIds,
-              async (tokenId) => {
-                const metadata =
-                  await fetchMetadata(
-                    tokenId
-                  );
+              nfts,
+              async (nft) => {
+                /*
+                 * Alchemy normally returns indexed metadata. If the index
+                 * is missing an image, fall back to HYC IPFS metadata.
+                 */
+                let name = nft.name;
+                let image = nft.image;
+                let animationUrl =
+                  nft.animationUrl;
 
-                const rawImage =
-                  metadata.image ??
-                  "";
+                if (!name || !image) {
+                  const metadata =
+                    await fetchMetadata(
+                      nft.tokenId
+                    );
 
-                const rawAnimation =
-                  metadata.animation_url ??
-                  "";
+                  name =
+                    name ||
+                    metadata.name ||
+                    `HYC #${nft.tokenId.toString()}`;
 
-                const image =
-                  ipfsToHttp(
-                    rawImage
-                  );
+                  image =
+                    image ||
+                    ipfsToHttp(
+                      metadata.image || ""
+                    );
 
-                const animationUrl =
-                  ipfsToHttp(
-                    rawAnimation
-                  );
+                  animationUrl =
+                    animationUrl ||
+                    ipfsToHttp(
+                      metadata.animation_url ||
+                        ""
+                    );
+                }
 
                 return {
-                  tokenId,
-
+                  tokenId: nft.tokenId,
                   name:
-                    metadata.name ??
-                    `HYC #${tokenId.toString()}`,
-
-                  image:
-                    image ||
-                    "/1.gif",
-
+                    name ||
+                    `HYC #${nft.tokenId.toString()}`,
+                  image: image || "/1.gif",
                   animationUrl:
-                    animationUrl ||
-                    undefined,
+                    animationUrl || undefined,
                 };
               },
               8
@@ -925,26 +727,18 @@ export default function Home() {
           );
 
           setNFTLoadError(
-            error instanceof
-              Error
+            error instanceof Error
               ? error.message
               : "Unable to load your HYC NFTs."
           );
 
           setOwnedNFTs([]);
         } finally {
-          setIsLoadingNFTs(
-            false
-          );
+          setIsLoadingNFTs(false);
         }
       },
-      [
-        address,
-        wrongNetwork,
-        publicClient,
-      ]
+      [address, wrongNetwork]
     );
-
 
   /* ==========================================================
      LOAD NFTS
