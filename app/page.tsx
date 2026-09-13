@@ -1274,13 +1274,59 @@ export default function Home() {
         </div>
 
 
-        <div className="hero-art">
+        <div
+          className="hero-art"
+          style={{
+            position: "relative",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            minHeight: "100%",
+            overflow: "hidden",
+          }}
+        >
+          <div
+            className="hero-logo"
+            aria-label="HYC — Hood Yacht Club"
+            style={{
+              position: "relative",
+              zIndex: 2,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              textAlign: "center",
+              width: "100%",
+              padding: "2rem",
+            }}
+          >
+            <div
+              style={{
+                fontSize: "clamp(7rem, 15vw, 13rem)",
+                lineHeight: 0.78,
+                fontWeight: 900,
+                letterSpacing: "-0.09em",
+                color: "#ccff00",
+                textShadow: "0 0 1px #ccff00",
+              }}
+            >
+              HYC
+            </div>
 
-          <img
-            src="/hood-yacht-club.gif"
-            alt="Hood Yacht Club"
-          />
-
+            <div
+              style={{
+                marginTop: "1.5rem",
+                fontSize: "clamp(0.9rem, 1.35vw, 1.25rem)",
+                lineHeight: 1,
+                fontWeight: 700,
+                letterSpacing: "0.16em",
+                color: "#ccff00",
+                textTransform: "uppercase",
+              }}
+            >
+              HOOD YACHT CLUB
+            </div>
+          </div>
         </div>
 
       </section>
