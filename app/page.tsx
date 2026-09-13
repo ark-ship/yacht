@@ -268,75 +268,159 @@ function makeTokenRange(
   return tokenIds;
 }
 
+const erc721EnumerableAbi = [
+  {
+    type: "function",
+    name: "supportsInterface",
+    stateMutability: "view",
+    inputs: [
+      { name: "interfaceId", type: "bytes4" },
+    ],
+    outputs: [
+      { name: "", type: "bool" },
+    ],
+  },
+  {
+    type: "function",
+    name: "tokenOfOwnerByIndex",
+    stateMutability: "view",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "index", type: "uint256" },
+    ],
+    outputs: [
+      { name: "", type: "uint256" },
+    ],
+  },
+] as const;
+
+const ERC721_ENUMERABLE_INTERFACE_ID =
+  "0x780e9d63" as const;
+
 async function findOwnedTokenIds(
   publicClient: PublicClient,
-  wallet: string,
+  wallet: Address,
   start: number,
   end: number
 ): Promise<bigint[]> {
-  const ownedTokenIds: bigint[] = [];
   const walletAddress =
     normalizeAddress(wallet);
 
-  const batchSize = 100;
+  /*
+   * First try ERC721Enumerable. This is the production-friendly path
+   * because it asks the NFT contract directly which token IDs belong
+   * to the connected wallet. No event-history scan and no multicall.
+   */
+  try {
+    const enumerableSupported =
+      await publicClient.readContract({
+        address: NFT_CONTRACT,
+        abi: erc721EnumerableAbi,
+        functionName: "supportsInterface",
+        args: [
+          ERC721_ENUMERABLE_INTERFACE_ID,
+        ],
+      });
+
+    if (enumerableSupported) {
+      const balance =
+        await publicClient.readContract({
+          address: NFT_CONTRACT,
+          abi: erc721Abi,
+          functionName: "balanceOf",
+          args: [wallet],
+        });
+
+      const ownedTokenIds: bigint[] = [];
+
+      for (
+        let index = 0n;
+        index < balance;
+        index += 1n
+      ) {
+        const tokenId =
+          await publicClient.readContract({
+            address: NFT_CONTRACT,
+            abi: erc721EnumerableAbi,
+            functionName: "tokenOfOwnerByIndex",
+            args: [wallet, index],
+          });
+
+        ownedTokenIds.push(tokenId);
+      }
+
+      return ownedTokenIds;
+    }
+  } catch (error) {
+    console.warn(
+      "ERC721Enumerable lookup unavailable, falling back to ownerOf scan.",
+      error
+    );
+  }
+
+  /*
+   * Generic ERC721 fallback. This works even when the collection does
+   * not implement ERC721Enumerable. Calls are sent individually so
+   * this does not depend on Multicall3 being deployed on Robinhood.
+   */
   const tokenIds =
     makeTokenRange(start, end);
 
-  for (
-    let offset = 0;
-    offset < tokenIds.length;
-    offset += batchSize
-  ) {
-    const batch =
-      tokenIds.slice(
-        offset,
-        offset + batchSize
-      );
+  const ownedTokenIds: bigint[] = [];
+  const concurrency = 20;
+  let cursor = 0;
 
-    const results =
-      await publicClient.multicall({
-        contracts: batch.map(
-          (tokenId) => ({
-            address:
-              NFT_CONTRACT,
-            abi:
-              erc721Abi,
-            functionName:
-              "ownerOf",
-            args: [tokenId],
-          })
-        ),
-        allowFailure: true,
-      });
+  async function worker() {
+    while (true) {
+      const index = cursor++;
 
-    for (
-      let index = 0;
-      index < results.length;
-      index += 1
-    ) {
-      const result =
-        results[index];
-
-      if (
-        result.status !==
-        "success"
-      ) {
-        continue;
+      if (index >= tokenIds.length) {
+        return;
       }
 
-      const owner =
-        String(result.result);
+      const tokenId = tokenIds[index];
 
-      if (
-        normalizeAddress(owner) ===
-        walletAddress
-      ) {
-        ownedTokenIds.push(
-          batch[index]
-        );
+      try {
+        const owner =
+          await publicClient.readContract({
+            address: NFT_CONTRACT,
+            abi: erc721Abi,
+            functionName: "ownerOf",
+            args: [tokenId],
+          });
+
+        if (
+          normalizeAddress(String(owner)) ===
+          walletAddress
+        ) {
+          ownedTokenIds.push(tokenId);
+        }
+      } catch {
+        // Non-existent/burned token IDs revert. Ignore them.
       }
     }
   }
+
+  await Promise.all(
+    Array.from(
+      {
+        length: Math.min(
+          concurrency,
+          tokenIds.length
+        ),
+      },
+      () => worker()
+    )
+  );
+
+  ownedTokenIds.sort(
+    (a, b) =>
+      a < b
+        ? -1
+        : a > b
+        ? 1
+        : 0
+  );
 
   return ownedTokenIds;
 }
@@ -736,10 +820,11 @@ export default function Home() {
            * Production-safe ownership lookup.
            *
            * We do NOT scan the entire Transfer history anymore.
-           * Instead we batch ownerOf() calls through viem multicall.
+           * We first use ERC721Enumerable when available.
+           * Otherwise the loader falls back to direct ownerOf() calls.
            *
-           * HYC supply = 5,555, so this is bounded and does not
-           * depend on eth_getLogs block-range limits.
+           * HYC supply = 5,555, so the fallback is bounded and does not
+           * depend on eth_getLogs block-range limits or Multicall3.
            */
           let ownedTokenIds =
             await findOwnedTokenIds(
