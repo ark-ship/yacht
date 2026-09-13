@@ -9,8 +9,7 @@ import {
 
 import {
   formatUnits,
-  parseAbiItem,
-  type Address,
+  type PublicClient,
 } from "viem";
 
 import {
@@ -77,10 +76,6 @@ const NFT_METADATA_GATEWAYS = [
   `https://ipfs.io/ipfs/${NFT_METADATA_CID}`,
   `https://dweb.link/ipfs/${NFT_METADATA_CID}`,
 ];
-
-const TRANSFER_EVENT = parseAbiItem(
-  "event Transfer(address indexed from,address indexed to,uint256 indexed tokenId)"
-);
 
 const REWARD_OPTIONS: DurationOption[] = [
   {
@@ -254,6 +249,138 @@ function normalizeAddress(
   value: string
 ): string {
   return value.toLowerCase();
+}
+
+function makeTokenRange(
+  start: number,
+  end: number
+): bigint[] {
+  const tokenIds: bigint[] = [];
+
+  for (
+    let tokenId = start;
+    tokenId <= end;
+    tokenId += 1
+  ) {
+    tokenIds.push(BigInt(tokenId));
+  }
+
+  return tokenIds;
+}
+
+async function findOwnedTokenIds(
+  publicClient: PublicClient,
+  wallet: string,
+  start: number,
+  end: number
+): Promise<bigint[]> {
+  const ownedTokenIds: bigint[] = [];
+  const walletAddress =
+    normalizeAddress(wallet);
+
+  const batchSize = 100;
+  const tokenIds =
+    makeTokenRange(start, end);
+
+  for (
+    let offset = 0;
+    offset < tokenIds.length;
+    offset += batchSize
+  ) {
+    const batch =
+      tokenIds.slice(
+        offset,
+        offset + batchSize
+      );
+
+    const results =
+      await publicClient.multicall({
+        contracts: batch.map(
+          (tokenId) => ({
+            address:
+              NFT_CONTRACT,
+            abi:
+              erc721Abi,
+            functionName:
+              "ownerOf",
+            args: [tokenId],
+          })
+        ),
+        allowFailure: true,
+      });
+
+    for (
+      let index = 0;
+      index < results.length;
+      index += 1
+    ) {
+      const result =
+        results[index];
+
+      if (
+        result.status !==
+        "success"
+      ) {
+        continue;
+      }
+
+      const owner =
+        String(result.result);
+
+      if (
+        normalizeAddress(owner) ===
+        walletAddress
+      ) {
+        ownedTokenIds.push(
+          batch[index]
+        );
+      }
+    }
+  }
+
+  return ownedTokenIds;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  worker: (item: T) => Promise<R>,
+  concurrency = 8
+): Promise<R[]> {
+  const results =
+    new Array<R>(items.length);
+
+  let nextIndex = 0;
+
+  async function runWorker() {
+    while (true) {
+      const index =
+        nextIndex++;
+
+      if (
+        index >= items.length
+      ) {
+        return;
+      }
+
+      results[index] =
+        await worker(items[index]);
+    }
+  }
+
+  const workers =
+    Math.min(
+      concurrency,
+      items.length
+    );
+
+  await Promise.all(
+    Array.from(
+      { length: workers },
+      () => runWorker()
+    )
+  );
+
+  return results;
 }
 
 /* ============================================================
@@ -606,212 +733,97 @@ export default function Home() {
 
         try {
           /*
-           * Read all ERC721 Transfer events
-           * and calculate current ownership.
+           * Production-safe ownership lookup.
            *
-           * This is real blockchain data.
+           * We do NOT scan the entire Transfer history anymore.
+           * Instead we batch ownerOf() calls through viem multicall.
+           *
+           * HYC supply = 5,555, so this is bounded and does not
+           * depend on eth_getLogs block-range limits.
            */
-          const latestBlock =
-            await publicClient.getBlockNumber();
-
-          let logs:
-            Array<{
-              args: {
-                from?: Address;
-                to?: Address;
-                tokenId?: bigint;
-              };
-            }> = [];
-
-          try {
-            const result =
-              await publicClient.getLogs({
-                address:
-                  NFT_CONTRACT,
-
-                event:
-                  TRANSFER_EVENT,
-
-                fromBlock:
-                  0n,
-
-                toBlock:
-                  latestBlock,
-              });
-
-            logs =
-              result as typeof logs;
-          } catch {
-            /*
-             * Fallback for RPC providers
-             * that limit large block ranges.
-             */
-            const chunkSize =
-              1_000_000n;
-
-            for (
-              let start = 0n;
-              start <= latestBlock;
-              start +=
-                chunkSize
-            ) {
-              const end =
-                start +
-                chunkSize -
-                1n >
-                latestBlock
-                  ? latestBlock
-                  : start +
-                    chunkSize -
-                    1n;
-
-              try {
-                const result =
-                  await publicClient.getLogs({
-                    address:
-                      NFT_CONTRACT,
-
-                    event:
-                      TRANSFER_EVENT,
-
-                    fromBlock:
-                      start,
-
-                    toBlock:
-                      end,
-                  });
-
-                logs.push(
-                  ...(result as typeof logs)
-                );
-              } catch {
-                /*
-                 * Skip a failed chunk.
-                 */
-              }
-            }
-          }
-
-          const ownerMap =
-            new Map<
-              string,
-              string
-            >();
+          let ownedTokenIds =
+            await findOwnedTokenIds(
+              publicClient,
+              address,
+              1,
+              NFT_SUPPLY
+            );
 
           /*
-           * Process transfers chronologically.
+           * Fallback for collections minted from token ID 0.
+           * This costs another bounded scan only when the first
+           * convention returns zero NFTs.
            */
-          for (
-            const log of logs
+          if (
+            ownedTokenIds.length ===
+            0
           ) {
-            const tokenId =
-              log.args?.tokenId;
-
-            const from =
-              log.args?.from;
-
-            const to =
-              log.args?.to;
-
-            if (
-              tokenId ===
-                undefined ||
-              !to
-            ) {
-              continue;
-            }
-
-            const key =
-              tokenId.toString();
-
-            ownerMap.set(
-              key,
-              normalizeAddress(
-                String(to)
-              )
-            );
+            ownedTokenIds =
+              await findOwnedTokenIds(
+                publicClient,
+                address,
+                0,
+                NFT_SUPPLY - 1
+              );
           }
 
-          const wallet =
-            normalizeAddress(
-              address
-            );
-
-          const ownedTokenIds =
-            Array.from(
-              ownerMap.entries()
-            )
-              .filter(
-                ([
-                  ,
-                  owner,
-                ]) =>
-                  owner === wallet
-              )
-              .map(
-                ([
-                  tokenId,
-                ]) =>
-                  BigInt(tokenId)
-              )
-              .sort(
-                (a, b) =>
-                  a < b
-                    ? -1
-                    : a > b
-                    ? 1
-                    : 0
-              );
+          ownedTokenIds.sort(
+            (a, b) =>
+              a < b
+                ? -1
+                : a > b
+                ? 1
+                : 0
+          );
 
           /*
-           * Fetch metadata for currently owned NFTs.
+           * Fetch metadata in controlled parallel batches so a wallet
+           * holding many NFTs does not flood the IPFS gateways.
            */
           const metadataResults =
-            await Promise.all(
-              ownedTokenIds.map(
-                async (
-                  tokenId
-                ) => {
-                  const metadata =
-                    await fetchMetadata(
-                      tokenId
-                    );
+            await mapWithConcurrency(
+              ownedTokenIds,
+              async (tokenId) => {
+                const metadata =
+                  await fetchMetadata(
+                    tokenId
+                  );
 
-                  const rawImage =
-                    metadata.image ??
-                    "";
+                const rawImage =
+                  metadata.image ??
+                  "";
 
-                  const rawAnimation =
-                    metadata.animation_url ??
-                    "";
+                const rawAnimation =
+                  metadata.animation_url ??
+                  "";
 
-                  const image =
-                    ipfsToHttp(
-                      rawImage
-                    );
+                const image =
+                  ipfsToHttp(
+                    rawImage
+                  );
 
-                  const animationUrl =
-                    ipfsToHttp(
-                      rawAnimation
-                    );
+                const animationUrl =
+                  ipfsToHttp(
+                    rawAnimation
+                  );
 
-                  return {
-                    tokenId,
+                return {
+                  tokenId,
 
-                    name:
-                      metadata.name ??
-                      `HYC #${tokenId.toString()}`,
+                  name:
+                    metadata.name ??
+                    `HYC #${tokenId.toString()}`,
 
-                    image:
-                      image ||
-                      "/1.gif",
+                  image:
+                    image ||
+                    "/1.gif",
 
-                    animationUrl:
-                      animationUrl ||
-                      undefined,
-                  };
-                }
-              )
+                  animationUrl:
+                    animationUrl ||
+                    undefined,
+                };
+              },
+              8
             );
 
           setOwnedNFTs(
@@ -821,6 +833,7 @@ export default function Home() {
           error
         ) {
           console.error(
+            "HYC NFT loading failed:",
             error
           );
 
@@ -830,6 +843,8 @@ export default function Home() {
               ? error.message
               : "Unable to load your HYC NFTs."
           );
+
+          setOwnedNFTs([]);
         } finally {
           setIsLoadingNFTs(
             false
@@ -842,6 +857,7 @@ export default function Home() {
         publicClient,
       ]
     );
+
 
   /* ==========================================================
      LOAD NFTS
